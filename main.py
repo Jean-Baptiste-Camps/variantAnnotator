@@ -67,7 +67,7 @@ class FewShotVariantDataset(Dataset):
             "Voici quelques exemples pour te guider :\n"
             "Exemple 1 : Variantes : \"oi (HVGP)|avoie (F)| ai (ASRM)\" -> Classification : morsynt\n"
             "Exemple 2 : Variantes : \"consoil (HM)|conseil (PG)|consel (FRA)\" -> Classification : graph\n"
-            "Exemple 3 : Variantes : \"consel (HPFGRMA)|secors (V)|confort (S)\" -> Classification : semlex:minor:syn\n\n"
+            "Exemple 3 : Variantes : \"consel (HPFGRMA)|secors (V)|confort (S)\" -> Classification : semlex:minor:syn\n"
             "Consigne stricte : Réponds UNIQUEMENT avec l'un des 8 labels listés ci-dessus. Aucun commentaire.\n"
             "Classification : [/INST]" # Close instruction block before providing target data
         )
