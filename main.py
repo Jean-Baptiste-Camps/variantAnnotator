@@ -68,12 +68,24 @@ class FewShotVariantDataset(Dataset):
             "Exemple 1 : Variantes : \"oi (HVGP)|avoie (F)| ai (ASRM)\" -> Classification : morsynt\n"
             "Exemple 2 : Variantes : \"consoil (HM)|conseil (PG)|consel (FRA)\" -> Classification : graph\n"
             "Exemple 3 : Variantes : \"consel (HPFGRMA)|secors (V)|confort (S)\" -> Classification : semlex:minor:syn\n"
-            "Exemple 4 : Variantes : \"pri (HFGASR)|depri (P)\" -> Classification : semlex:minor:constrmorph\n"
-            "Exemple 5 : Variantes : \"fox (HAnVGP)|faus (F)|fel (S)\" -> Classification : semlex:minor:semsim\n"
-            "Exemple 6 : Variantes : \"quanque (AnPVFGS)|ce que (H)\" -> Classification : semlex:minor:gramm\n"
-            "Exemple 7 : Variantes : \"En sa maison (HAnPFGAS)|Et as plus vils (V)\" -> Classification : semlex:major\n"
-            "Exemple 8 : Variantes : \"poons (HAnPVFG)|poommes (S)\" -> Classification : flex\n"
-            "Consigne stricte : Réponds UNIQUEMENT avec l'un des 8 labels listés ci-dessus. Aucun commentaire.\n"
+            "Exemple 4: Variantes : \"jaianz (H)|jaienz (An)|gaians (PS)|jaians (VF)|geans (G)|jaiens (A)\" -> Classification : graph\n"
+            "Exemple 5 : Variantes : \"pri (HFGASR)|depri (P)\" -> Classification : semlex:minor:constrmorph\n"
+            "Exemple 6 : Variantes : \"fox (HAnVGP)|faus (F)|fel (S)\" -> Classification : semlex:minor:semsim\n"
+            "Exemple 7 : Variantes : \"enmainne (HSA)|enmaine (PFMod)|enmoine (G)|emmaine (R)|enmeine (M)\" -> Classification : graph\n"
+            "Exemple 8 : Variantes : \"quanque (AnPVFGS)|ce que (H)\" -> Classification : semlex:minor:gramm\n"
+            "Exemple 9 : Variantes : \"En sa maison (HAnPFGAS)|Et as plus vils (V)\" -> Classification : semlex:major\n"
+            "Exemple 10 : Variantes : \"poons (HAnPVFG)|poommes (S)\" -> Classification : flex\n"
+            "Exemple 11 : Variantes : \"je (HPG)|ge (V)|jou (FS)|jo (AR)\" -> Classification : graph\n"
+            "Exemple 12 : Variantes : \"come (HAnPVFGSR)|que (A)\" -> Classification : semlex:minor:gramm\n"
+            "Consigne stricte : Réponds UNIQUEMENT avec l'un des codes numériques de 1 à 8 listés ci-dessous. Aucun commentaire.\n"
+            "1 pour graph (variation graphémique).\n"
+            "2 pour flex (variation flexionnelle).\n"
+            "3 pour morsynt (variation morphosyntaxique).\n"
+            "4 pour semlex:minor:gramm (écart sémantico-lexical faible s’expliquant par une variante de grammème).\n"
+            "5 pour semlex:minor:constrmorph (écart sémantico-lexical faible s’expliquant par la morphologie constructionnelle).\n"
+            "6 pour semlex:minor:syn (écart sémantico-lexical faible s’expliquant par une relation de synonymie).\n"
+            "7 pour semlex:minor:semsim (écart sémantico-lexical faible s’expliquant par proximité sémantique telles que hypéronimie, co-hyponimie, etc.)\n"
+            "8 pour semlex:major (écart sémantico-lexical fort).\n"       
             "Classification : [/INST]" # Close instruction block before providing target data
         )
 
@@ -122,21 +134,24 @@ outputs = generator(
     # Remove the single-token logits processor for a moment to see what it spells out naturally
 )
 
+# Map integer tokens back to your labels
+INT_TO_LABEL = {
+    "1": "graph",
+    "2": "flex",
+    "3": "morsynt",
+    "4": "semlex:minor:gramm",
+    "5": "semlex:minor:constrmorph",
+    "6": "semlex:minor:syn",
+    "7": "semlex:minor:semsim",
+    "8": "semlex:major"
+}
+
 for out in tqdm(outputs, total=len(df_variants)):
-    # Strip whitespaces or trailing punctuation
-    pred_text = out[0]["generated_text"].strip().split()[0] 
-    
-    # Clean match mapping
-    matched_target = "other"
-    if pred_text in ALLOWED_TARGETS:
-        matched_target = pred_text
-    else:
-        # Fallback partial matching
-        for target in ALLOWED_TARGETS:
-            if target in pred_text or pred_text in target:
-                matched_target = target
-                break
-    y_pred.append(matched_target)
+    pred_char = out[0]["generated_text"].strip()
+    # Extract just the first numeric digit found
+    digit = ''.join(filter(str.isdigit, pred_char))
+    y_pred.append(INT_TO_LABEL.get(digit, "other"))
+
 
 print("\n=== FINAL CLASSIFICATION REPORT ===")
 print(classification_report(y_true, y_pred, zero_division=0))
