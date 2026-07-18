@@ -1,136 +1,129 @@
 import sys
+import os
 
-# 1. Provide the getter if missing
 if not hasattr(sys, 'get_int_max_str_digits'):
     sys.get_int_max_str_digits = lambda: 4300
-
-# 2. Provide a type-perfect setter if missing to pass strict signature validation
 if not hasattr(sys, 'set_int_max_str_digits'):
-    def set_int_max_str_digits(maxdigits: int) -> None:
-        pass  # Intentionally do nothing safely
-
+    def set_int_max_str_digits(maxdigits: int) -> None: pass
     sys.set_int_max_str_digits = set_int_max_str_digits
 
-import os
-os.environ["TORCH_DYNAMO_DISABLE"] = "1"  # Désactive torch._dynamo
-os.environ["TORCHDYNAMO_DISABLE"] = "1"   # Alternative pour certaines versions
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1" 
 
-
-#from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, BitsAndBytesConfig
 from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM, GenerationConfig
+from transformers import LogitsProcessor, LogitsProcessorList
 import torch
 import pandas as pd
 from sklearn.metrics import classification_report
+from torch.utils.data import Dataset
+from transformers.pipelines.pt_utils import KeyDataset
 from tqdm import tqdm
 
-# --- Vérification des versions ---
-print(f"PyTorch version: {torch.__version__}")
-import transformers
-print(f"Transformers version: {transformers.__version__}")
+ALLOWED_TARGETS = [
+    "graph", "flex", "morsynt", "semlex:minor:gramm",
+    "semlex:minor:constrmorph", "semlex:minor:syn", 
+    "semlex:minor:semsim", "semlex:major"
+]
 
+def normalize_true_label(label):
+    label = str(label).strip()
+    if label.startswith("plur-"):
+        label = label.replace("plur-", "")
+    if label in ALLOWED_TARGETS:
+        return label
+    for target in ALLOWED_TARGETS:
+        if target in label:
+            return target
+    return "other"
 
-# Charger Mistral 7B (ou une version plus légère si GPU limité)
+class RestrictedTokensProcessor(LogitsProcessor):
+    def __init__(self, allowed_token_ids):
+        self.allowed_token_ids = allowed_token_ids
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        # Prevent anything else from being selected
+        mask = torch.ones_like(scores) * float('-inf')
+        for token_id in self.allowed_token_ids:
+            mask[:, token_id] = 0
+        return scores + mask
+
+class FewShotVariantDataset(Dataset):
+    def __init__(self, df):
+        self.df = df
+        
+        # --- PASTE YOUR EXACT SYSTEM RULES, EXPLANATIONS, AND FEW SHOTS HERE ---
+        self.system_and_examples = (
+            "<s>[INST] Tu es un expert en philologie et en traitement automatique des langues pour l'ancien français. "
+            "Ta tâche consiste à classifier des variantes textuelles (lieux variants) issues de manuscrits médiévaux. "
+            "Voici les définitions et explications des catégories utilisables avec des exemples.\n" 
+            "Dans chaque exemple, la barre verticale | sépare les variantes, et les sigles entre parenthèses sont ceux des manuscrits:\n"
+            "- graph: variation graphique (ex. païs (AB)|pays (FH)).\n"
+            "- flex: variation flexionnelle (ex. savomes (CB)|savon (H)|savons (P)).\n"
+            "- morsynt: variation morphosyntaxique (ex. les despose (E)|le deposera (G)).\n"
+            "- semlex:minor:gramm: écart sémantico-lexical faible s’expliquant par une variante de grammème (ex. cele (Ao)|l’ (Ez)).\n"
+            "- semlex:minor:constrmorph: écart sémantico-lexical faible s’expliquant par la morphologie constructionnelle (mervoillent (Ao)|esmerveillent (Ez)).\n"
+            "- semlex:minor:syn: écart sémantico-lexical faible s’expliquant par une relation de synonymie (ex. trichier (Ao)|decevoir (Ez)).\n"
+            "- semlex:minor:semsim: écart sémantico-lexical faible s’expliquant par proximité sémantique (sergant (B)|archir (M)).\n"
+            "- semlex:major: écart sémantico-lexical fort (ex. acorde (Ao)| discorde (Ez)).\n"            
+            "Voici quelques exemples pour te guider :\n"
+            "Exemple 1 : Variantes : \"oi (HVGP)|avoie (F)| ai (ASRM)\" -> Classification : morsynt\n"
+            "Exemple 2 : Variantes : \"consoil (HM)|conseil (PG)|consel (FRA)\" -> Classification : graph\n"
+            "Exemple 3 : Variantes : \"consel (HPFGRMA)|secors (V)|confort (S)\" -> Classification : semlex:minor:syn\n\n"
+            "Consigne stricte : Réponds UNIQUEMENT avec l'un des 8 labels listés ci-dessus. Aucun commentaire.\n"
+            "Classification : [/INST]" # Close instruction block before providing target data
+        )
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        # We append the target instance right after the rules block
+        # Mistral will expect the very next generated token to fulfill the response loop
+        target_instance = f" Variantes : \"{self.df.iloc[idx]['readings']}\" -> Classification :"
+        return {"prompt": self.system_and_examples + target_instance}
+
+# Initialize Model and Setup Tokens
 model_name = "mistralai/Mistral-7B-Instruct-v0.2"
+tokenizer = AutoTokenizer.from_pretrained(model_name, clean_up_tokenization_spaces=False)
+tokenizer.pad_token = tokenizer.eos_token
 
-tokenizer = AutoTokenizer.from_pretrained(
-    model_name, 
-    clean_up_tokenization_spaces=False  # Suppresses the BPE tokenizer warning
-)
+model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.float16, device_map="auto")
+model.config.pad_token_id = tokenizer.eos_token_id
 
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    dtype=torch.float16,  # 'torch_dtype' is deprecated, updated to 'dtype'
-    device_map="auto"     # Automatically handles GPU/CPU mapping
-)
+generator = pipeline("text-generation", model=model, tokenizer=tokenizer, clean_up_tokenization_spaces=False)
 
-# Create generation pipeline with tokenizer configuration cleanly passed through
-generator = pipeline(
-    "text-generation",
-    model=model,
-    tokenizer=tokenizer,
-    clean_up_tokenization_spaces=False  # This silences the BPE warning inside the pipeline
-)
+# Collect the exact tokens Mistral matches to your label strings
+allowed_token_ids = [tokenizer.encode(t, add_special_tokens=False)[0] for t in ALLOWED_TARGETS]
+logits_processors = LogitsProcessorList([RestrictedTokensProcessor(allowed_token_ids)])
 
-#TODO: on laisse tomber le contexte et les "nonsense" readings pour le moment
-def classify_variant(readings):#, types_autorises):
-    prompt_v1 = f"""
-    Tu es un expert en philologie et linguistique historiques spécialisé dans l'ancien français.
-    Voici un lieu variant extrait d'une collation de manuscrits 
-    (les variantes sont séparées par une barre verticale | et les sigles des témoins donnés entre parenthèses):
-
-    ---
-    Variantes : "{readings}"
-    ---
-
-    Classifie ce lieu variant selon la typologie suivante :
-    1. "graph" : variation graphique (ex. "païs (AB) | pays (FH)").
-    2. "flex" : variation flexionnelle (ex. "savomes (CB) | savon (H) | savons (P)").
-    3. "morsynt" : variation morphosyntaxique (ex. "les despose (E) | le deposera (G)")
-    4. "semlex:minor:gramm" : écart sémantico-lexical faible s’expliquant par une variante de grammème ("cele (Ao) | l’ (Ez)").
-    5. "semlex:minor:constrmorph": écart sémantico-lexical faible s’expliquant par la morphologie constructionnelle ("mervoillent (Ao) | esmerveillent (Ez)").
-    6. "semlex:minor:syn": écart sémantico-lexical faible s’expliquant par une relation de synonymie ("trichier (Ao) | decevoir (Ez)").
-    7. "semlex:minor:semsim": écart sémantico-lexical faible s’expliquant par des relations cognitives-associatives de proximité et de contiguïté sémantique ("sergant (B) | archir (M)").
-    8. "semlex:major": écart sémantico-lexical fort ("acorde (Ao) | discorde (Ez)")
-    
-    Réponds **uniquement** avec le type le plus probable, sans justification.
-    """
-
-    # Prompt structured to force a base model to complete with the target token
-    prompt = f"""Tu es un expert en philologie et linguistique historiques spécialisé dans l'ancien français.
-    Voici une typologie stricte de classification :
-    - "graph" : variation graphique (ex. "païs (AB) | pays (FH)").
-    - "flex" : variation flexionnelle (ex. "savomes (CB) | savon (H) | savons (P)").
-    - "morsynt" : variation morphosyntaxique (ex. "les despose (E) | le deposera (G)")
-    - "semlex:minor:gramm" : écart sémantico-lexical faible s’expliquant par une variante de grammème ("cele (Ao) | l’ (Ez)").
-    - "semlex:minor:constrmorph": écart sémantico-lexical faible s’expliquant par la morphologie constructionnelle ("mervoillent (Ao) | esmerveillent (Ez)").
-    - "semlex:minor:syn" : écart sémantico-lexical faible s’expliquant par une relation de synonymie ("trichier (Ao) | decevoir (Ez)").
-    - "semlex:minor:semsim" : écart sémantico-lexical faible s’expliquant par proximité sémantique ("sergant (B) | archir (M)").
-    - "semlex:major" : écart sémantico-lexical fort ("acorde (Ao) | discorde (Ez)")
-
-    Variantes à classifier : "{readings}"
-    Type le plus probable : """
-
-    # Generate response
-    # Pass an actual GenerationConfig object instead of a raw dictionary
-    gen_config = GenerationConfig(
-        max_new_tokens=10,
-        do_sample=False,
-        pad_token_id=tokenizer.eos_token_id
-    )
-
-    outputs = generator(
-        prompt,
-        return_full_text=False,
-        generation_config=gen_config
-    )
-
-    # Extract only the newly generated text
-    predicted_type = outputs[0]["generated_text"].strip().split("\n")[0].replace('"', '').strip()
-    return predicted_type
-
+# Data Processing Pipeline
 df_variants = pd.read_csv("Yvain_reviewed_2026_ids.tsv", sep="\t")
+dataset = FewShotVariantDataset(df_variants)
 
-# Target column names (Adjust "type" to your actual TSV column name)
-true_column = "type" 
-
-# Arrays to hold values
-y_true = []
+y_true = [normalize_true_label(lbl) for lbl in df_variants["type"]]
 y_pred = []
 
-# Toggle this to True to activate few-shot learning
-FEW_SHOT_MODE = False 
+print("Running evaluation on full prompt context + allowed logit masking...")
+outputs = generator(
+    KeyDataset(dataset, "prompt"),
+    batch_size=32,
+    return_full_text=False,
+    generation_config=GenerationConfig(
+        max_new_tokens=1, # The very first token generated will be locked to your 8 categories
+        do_sample=False,
+        pad_token_id=tokenizer.eos_token_id
+    ),
+    logits_processor=logits_processors
+)
 
-print(f"Starting evaluation (Few-Shot Mode: {FEW_SHOT_MODE})...")
-
-# Loop over rows with a progress bar
-for index, row in tqdm(df_variants.iterrows(), total=len(df_variants)):
-    true_label = str(row[true_column]).strip()
-    predicted_label = classify_variant(row["readings"])#, use_few_shot=FEW_SHOT_MODE)
+for out in tqdm(outputs, total=len(df_variants)):
+    pred_token = out[0]["generated_text"].strip()
     
-    y_true.append(true_label)
-    y_pred.append(predicted_label)
+    matched_target = "other"
+    for target in ALLOWED_TARGETS:
+        if target.startswith(pred_token) and len(pred_token) > 0:
+            matched_target = target
+            break
+    y_pred.append(matched_target)
 
-# Print Metrics Report
-print("\n=== CLASSIFICATION REPORT ===")
+print("\n=== FINAL CLASSIFICATION REPORT ===")
 print(classification_report(y_true, y_pred, zero_division=0))
-
