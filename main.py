@@ -103,26 +103,34 @@ y_true = [normalize_true_label(lbl) for lbl in df_variants["type"]]
 y_pred = []
 
 print("Running evaluation on full prompt context + allowed logit masking...")
+
 outputs = generator(
     KeyDataset(dataset, "prompt"),
     batch_size=32,
     return_full_text=False,
     generation_config=GenerationConfig(
-        max_new_tokens=1, # The very first token generated will be locked to your 8 categories
+        max_new_tokens=10,  # Let it finish the word!
         do_sample=False,
-        pad_token_id=tokenizer.eos_token_id
-    ),
-    logits_processor=logits_processors
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.encode("\n")[0] # Stop if it hits a newline
+    )
+    # Remove the single-token logits processor for a moment to see what it spells out naturally
 )
 
 for out in tqdm(outputs, total=len(df_variants)):
-    pred_token = out[0]["generated_text"].strip()
+    # Strip whitespaces or trailing punctuation
+    pred_text = out[0]["generated_text"].strip().split()[0] 
     
+    # Clean match mapping
     matched_target = "other"
-    for target in ALLOWED_TARGETS:
-        if target.startswith(pred_token) and len(pred_token) > 0:
-            matched_target = target
-            break
+    if pred_text in ALLOWED_TARGETS:
+        matched_target = pred_text
+    else:
+        # Fallback partial matching
+        for target in ALLOWED_TARGETS:
+            if target in pred_text or pred_text in target:
+                matched_target = target
+                break
     y_pred.append(matched_target)
 
 print("\n=== FINAL CLASSIFICATION REPORT ===")
