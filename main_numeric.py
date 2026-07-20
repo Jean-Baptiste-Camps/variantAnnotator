@@ -84,6 +84,7 @@ class FewShotVariantDataset(Dataset):
         # We append definitions and target execution prompt *at the end* of the context block
         target_instance = (
             f"Voici les variantes à classifier :\n"
+            f"Contexte : \"{self.df.iloc[idx]['context']}\"\n" 
             f"Variantes : \"{self.df.iloc[idx]['readings']}\"\n\n"
             "Choisis STRICTEMENT le code numérique correspondant à la catégorie valide :\n"
             "1 : graph (variation graphémique, ex. païs|pays)\n"
@@ -140,7 +141,7 @@ print("Running memory-optimized inference loop...")
 # Dropping batch size down to 8 balances the huge contextual footprint of our long prompt
 outputs = generator(
     KeyDataset(dataset, "prompt"),
-    batch_size=8,
+    batch_size=16,
     return_full_text=False,
     generation_config=GenerationConfig(
         max_new_tokens=1,  # Set back to 1! The processor guarantees it's a clean digit selection.
